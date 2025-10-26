@@ -1,6 +1,5 @@
 import streamlit as st
 import os
-import sys
 import time
 import tempfile
 import warnings
@@ -32,6 +31,10 @@ if 'chat_history' not in st.session_state:
     st.session_state.chat_history = []
 if 'api_connected' not in st.session_state:
     st.session_state.api_connected = False
+if 'last_processed_audio' not in st.session_state:
+    st.session_state.last_processed_audio = None
+if 'processing' not in st.session_state:
+    st.session_state.processing = False
 
 # Configure Gemini API
 @st.cache_resource
@@ -97,20 +100,11 @@ def text_to_speech(text, lang='en'):
         st.error(f"Speech error: {e}")
         return None
 
-def transcribe_audio_file(audio_file_path):
-    """Transcribe audio file to text"""
-    r = sr.Recognizer()
-    try:
-        with sr.AudioFile(audio_file_path) as source:
-            audio = r.record(source)
-            text = r.recognize_google(audio)
-        return text, None
-    except Exception as e:
-        return None, str(e)
-
 def transcribe_audio_bytes(audio_bytes):
     """Transcribe audio from bytes (for st.audio_input)"""
     r = sr.Recognizer()
+    r.energy_threshold = 4000
+    r.dynamic_energy_threshold = True
     tmp_path = None
     try:
         # Save bytes to temporary WAV file
@@ -119,6 +113,8 @@ def transcribe_audio_bytes(audio_bytes):
             tmp_path = tmp_file.name
         
         with sr.AudioFile(tmp_path) as source:
+            # Adjust for ambient noise
+            r.adjust_for_ambient_noise(source, duration=0.5)
             audio = r.record(source)
             text = r.recognize_google(audio)
         
@@ -126,6 +122,14 @@ def transcribe_audio_bytes(audio_bytes):
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
         return text, None
+    except sr.UnknownValueError:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        return None, "Could not understand audio. Please speak clearly."
+    except sr.RequestError as e:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        return None, f"Could not request results; {e}"
     except Exception as e:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -135,28 +139,48 @@ def get_ai_response(question, short=True):
     """Get response from Gemini"""
     try:
         if short:
-            full_prompt = f"""You are Friday, a voice assistant. Give VERY short, crisp answers (maximum 10-15 words).
-Be direct and concise. No extra explanations unless asked.
+            full_prompt = f"""You are Friday, a helpful voice assistant. Give short, clear answers (10-20 words maximum).
+Be direct and friendly. Answer the question concisely.
 
 Question: {question}
 
-Answer briefly:"""
+Answer:"""
         else:
             full_prompt = question
         
         response = client.models.generate_content(
             model=MODEL_NAME,
-            contents=full_prompt
+            contents=full_prompt,
+            config={
+                'temperature': 0.7,
+                'max_output_tokens': 150 if short else 1000,
+            }
         )
         
-        return response.text
+        return response.text.strip()
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Sorry, I encountered an error: {str(e)}"
 
 def summarize_text(content):
     """Summarize provided text"""
-    prompt = f"Summarize this in 2-3 clear sentences:\n\n{content}"
-    return get_ai_response(prompt, short=False)
+    try:
+        prompt = f"""Please provide a clear and concise summary of the following text in 2-3 sentences:
+
+{content[:5000]}
+
+Summary:"""
+        
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=prompt,
+            config={
+                'temperature': 0.5,
+                'max_output_tokens': 500,
+            }
+        )
+        return response.text.strip()
+    except Exception as e:
+        return f"Error generating summary: {str(e)}"
 
 # Main UI
 st.title("🎤 Friday Voice Assistant")
@@ -191,23 +215,25 @@ with st.sidebar:
     # Clear chat
     if st.button("🗑️ Clear Chat History", use_container_width=True):
         st.session_state.chat_history = []
+        st.session_state.last_processed_audio = None
         st.rerun()
     
     st.markdown("---")
     st.markdown("### 📖 How to Use")
     st.markdown("""
-    1. **Chat Tab**: Ask questions via text or voice
-    2. **Summarize Notes**: Upload text files to summarize
-    3. **Transcribe Audio**: Convert audio files to text
-    """)
+    **Chat Tab:**
+    - 🎤 Click microphone to record
+    - 📁 Or upload audio file
+    - ✍️ Or type your question
     
-    st.markdown("---")
-    st.markdown("### 🎙️ Voice Recording")
-    st.markdown("""
-    - Click the microphone icon to record
-    - Speak clearly
-    - Recording stops automatically
-    - Your question is transcribed and answered
+    **Summarize Tab:**
+    - 📁 Upload text files
+    - ✍️ Or paste text directly
+    
+    **Transcribe Tab:**
+    - 🎤 Record or upload audio
+    - 📝 Get text transcription
+    - 📊 Optional: Summarize it
     """)
 
 # Create tabs
@@ -221,47 +247,57 @@ with tab1:
     st.markdown("#### 🎙️ Voice Input")
     st.caption("Click the microphone below to record your question")
     
-    audio_input = st.audio_input("Record your question")
+    audio_input = st.audio_input("Record your question", key="chat_audio_input")
     
-    if audio_input:
-        with st.spinner("🎧 Transcribing your audio..."):
-            text, error = transcribe_audio_bytes(audio_input)
+    # Process audio input only once
+    if audio_input is not None:
+        audio_bytes = audio_input.getvalue()
+        
+        # Check if this is a new audio recording
+        if audio_bytes != st.session_state.last_processed_audio and not st.session_state.processing:
+            st.session_state.last_processed_audio = audio_bytes
+            st.session_state.processing = True
             
-            if text:
-                st.success(f"📝 You said: **{text}**")
+            with st.spinner("🎧 Transcribing your audio..."):
+                text, error = transcribe_audio_bytes(audio_input)
                 
-                # Process with AI if connected
-                if st.session_state.api_connected:
-                    short_mode = response_mode == "Short (10-15 words)"
-                    with st.spinner("🤖 Friday is thinking..."):
-                        response = get_ai_response(text, short=short_mode)
+                if text:
+                    st.success(f"📝 You said: **{text}**")
+                    
+                    # Process with AI if connected
+                    if st.session_state.api_connected:
+                        short_mode = response_mode == "Short (10-15 words)"
                         
-                        # Add to chat history
-                        st.session_state.chat_history.append({
-                            "role": "user",
-                            "content": text
-                        })
-                        st.session_state.chat_history.append({
-                            "role": "assistant",
-                            "content": response
-                        })
-                        
-                        st.rerun()
+                        with st.spinner("🤖 Friday is thinking..."):
+                            response = get_ai_response(text, short=short_mode)
+                            
+                            # Add to chat history
+                            st.session_state.chat_history.append({
+                                "role": "user",
+                                "content": text
+                            })
+                            st.session_state.chat_history.append({
+                                "role": "assistant",
+                                "content": response
+                            })
+                    else:
+                        st.error("API not connected!")
                 else:
-                    st.error("API not connected!")
-            else:
-                st.error(f"❌ Transcription error: {error}")
+                    st.error(f"❌ {error}")
+            
+            st.session_state.processing = False
+            st.rerun()
     
     st.markdown("---")
     
     # Alternative: Upload Audio
     st.markdown("#### 📁 Or Upload Audio File")
-    uploaded_audio = st.file_uploader("Upload audio file (.wav)", type=["wav"], key="chat_audio_upload")
+    uploaded_audio = st.file_uploader("Upload audio file (.wav, .mp3)", type=["wav", "mp3"], key="chat_audio_upload")
     
     if uploaded_audio:
         st.audio(uploaded_audio, format="audio/wav")
         
-        if st.button("🎧 Transcribe Uploaded Audio", key="transcribe_chat_upload"):
+        if st.button("🎧 Transcribe & Ask Friday", key="transcribe_chat_upload"):
             with st.spinner("🎧 Transcribing..."):
                 text, error = transcribe_audio_bytes(uploaded_audio)
                 
@@ -284,21 +320,21 @@ with tab1:
                             })
                             st.rerun()
                 else:
-                    st.error(f"❌ Transcription error: {error}")
+                    st.error(f"❌ {error}")
     
     st.markdown("---")
     
     # Text Input Section
     st.markdown("#### ✍️ Text Input")
-    user_question = st.text_input(
-        "Or type your question here:",
-        placeholder="Ask me anything...",
-        key="user_input"
-    )
     
-    col1, col2 = st.columns([1, 5])
-    with col1:
-        submit_button = st.button("Send 📤", use_container_width=True)
+    # Use form to prevent auto-rerun
+    with st.form(key="text_input_form", clear_on_submit=True):
+        user_question = st.text_input(
+            "Or type your question here:",
+            placeholder="Ask me anything...",
+            key="user_input_field"
+        )
+        submit_button = st.form_submit_button("Send 📤", use_container_width=True)
     
     if submit_button and user_question:
         if st.session_state.api_connected:
@@ -336,10 +372,9 @@ with tab1:
                     
                     # Audio playback option for latest message
                     if enable_audio and i == len(st.session_state.chat_history) - 1:
-                        with st.spinner("🔊 Generating audio..."):
-                            audio_bytes = text_to_speech(message['content'])
-                            if audio_bytes:
-                                st.audio(audio_bytes, format='audio/mp3')
+                        audio_bytes = text_to_speech(message['content'])
+                        if audio_bytes:
+                            st.audio(audio_bytes, format='audio/mp3')
     else:
         st.info("👋 Start a conversation with Friday! Use voice recording, upload audio, or type your question.")
 
@@ -354,7 +389,7 @@ with tab2:
         st.markdown("#### 📁 Upload File")
         uploaded_file = st.file_uploader(
             "Choose a text file",
-            type=['txt', 'md', 'text'],
+            type=['txt', 'md', 'text', 'doc'],
             help="Upload .txt, .md, or other text files",
             key="notes_file_upload"
         )
@@ -366,9 +401,9 @@ with tab2:
                 
                 # Show preview
                 with st.expander("📄 Preview file content"):
-                    st.text(content[:500] + ("..." if len(content) > 500 else ""))
+                    st.text_area("File preview", content[:1000], height=200, disabled=True)
                 
-                if st.button("📊 Summarize File", use_container_width=True, key="summarize_file"):
+                if st.button("📊 Summarize File", use_container_width=True, key="summarize_file_btn"):
                     if st.session_state.api_connected:
                         with st.spinner("🤖 Generating summary..."):
                             summary = summarize_text(content)
@@ -376,14 +411,22 @@ with tab2:
                             st.markdown("#### 📋 Summary:")
                             st.success(summary)
                             
+                            # Download summary
+                            st.download_button(
+                                label="💾 Download Summary",
+                                data=summary,
+                                file_name=f"summary_{uploaded_file.name}",
+                                mime="text/plain"
+                            )
+                            
                             # Audio option
                             if enable_audio:
-                                with st.spinner("🔊 Generating audio..."):
-                                    audio_bytes = text_to_speech(summary)
-                                    if audio_bytes:
-                                        st.audio(audio_bytes, format='audio/mp3')
+                                st.markdown("#### 🔊 Listen to Summary")
+                                audio_bytes = text_to_speech(summary)
+                                if audio_bytes:
+                                    st.audio(audio_bytes, format='audio/mp3')
                     else:
-                        st.error("API not connected!")
+                        st.error("❌ API not connected! Please check your API key.")
             except Exception as e:
                 st.error(f"Error reading file: {e}")
     
@@ -391,15 +434,17 @@ with tab2:
         st.markdown("#### ✍️ Paste Text")
         text_input = st.text_area(
             "Or paste your text here:",
-            height=250,
+            height=300,
             placeholder="Paste your notes, articles, or any text you want summarized...",
             key="notes_text_input"
         )
         
         if text_input:
-            st.info(f"📊 {len(text_input)} characters, {len(text_input.split())} words")
+            word_count = len(text_input.split())
+            char_count = len(text_input)
+            st.info(f"📊 {char_count:,} characters | {word_count:,} words")
             
-            if st.button("📊 Summarize Text", use_container_width=True, key="summarize_text"):
+            if st.button("📊 Summarize Text", use_container_width=True, key="summarize_text_btn"):
                 if st.session_state.api_connected:
                     with st.spinner("🤖 Generating summary..."):
                         summary = summarize_text(text_input)
@@ -407,14 +452,22 @@ with tab2:
                         st.markdown("#### 📋 Summary:")
                         st.success(summary)
                         
+                        # Download summary
+                        st.download_button(
+                            label="💾 Download Summary",
+                            data=summary,
+                            file_name=f"summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                            mime="text/plain"
+                        )
+                        
                         # Audio option
                         if enable_audio:
-                            with st.spinner("🔊 Generating audio..."):
-                                audio_bytes = text_to_speech(summary)
-                                if audio_bytes:
-                                    st.audio(audio_bytes, format='audio/mp3')
+                            st.markdown("#### 🔊 Listen to Summary")
+                            audio_bytes = text_to_speech(summary)
+                            if audio_bytes:
+                                st.audio(audio_bytes, format='audio/mp3')
                 else:
-                    st.error("API not connected!")
+                    st.error("❌ API not connected! Please check your API key.")
 
 # TAB 3: Transcribe Audio
 with tab3:
@@ -427,39 +480,55 @@ with tab3:
         st.markdown("#### 🎙️ Record Audio")
         st.caption("Click the microphone to record")
         
-        recorded_audio = st.audio_input("Record audio for transcription")
+        recorded_audio = st.audio_input("Record audio for transcription", key="transcribe_audio_input")
         
         if recorded_audio:
             st.audio(recorded_audio, format="audio/wav")
             
-            if st.button("📝 Transcribe Recording", use_container_width=True, key="do_transcribe_recording"):
-                with st.spinner("🎧 Transcribing..."):
-                    text, error = transcribe_audio_bytes(recorded_audio)
-                    
-                    if text:
-                        st.success("✅ Transcription complete!")
-                        st.markdown("#### 📄 Transcription:")
-                        st.info(text)
+            col_a, col_b = st.columns(2)
+            
+            with col_a:
+                if st.button("📝 Transcribe", use_container_width=True, key="do_transcribe_recording"):
+                    with st.spinner("🎧 Transcribing..."):
+                        text, error = transcribe_audio_bytes(recorded_audio)
                         
-                        # Copy to clipboard
-                        st.code(text, language=None)
-                        
-                        # Option to summarize
-                        if st.button("📊 Summarize This", key="sum_recording"):
-                            if st.session_state.api_connected:
-                                with st.spinner("🤖 Generating summary..."):
-                                    summary = summarize_text(text)
-                                    st.markdown("#### 📋 Summary:")
-                                    st.success(summary)
-                                    
-                                    if enable_audio:
-                                        audio_bytes = text_to_speech(summary)
-                                        if audio_bytes:
-                                            st.audio(audio_bytes, format='audio/mp3')
-                            else:
-                                st.error("API not connected!")
-                    else:
-                        st.error(f"❌ Transcription failed: {error}")
+                        if text:
+                            st.success("✅ Transcription complete!")
+                            st.markdown("#### 📄 Transcription:")
+                            st.info(text)
+                            
+                            # Store in session state
+                            st.session_state['last_transcription'] = text
+                            
+                            # Copy to clipboard
+                            st.code(text, language=None)
+                            
+                            # Download transcription
+                            st.download_button(
+                                label="💾 Download Transcription",
+                                data=text,
+                                file_name=f"transcription_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                                mime="text/plain"
+                            )
+                        else:
+                            st.error(f"❌ {error}")
+            
+            with col_b:
+                # Check if we have a transcription to summarize
+                if 'last_transcription' in st.session_state and st.session_state['last_transcription']:
+                    if st.button("📊 Summarize", use_container_width=True, key="sum_recording"):
+                        if st.session_state.api_connected:
+                            with st.spinner("🤖 Generating summary..."):
+                                summary = summarize_text(st.session_state['last_transcription'])
+                                st.markdown("#### 📋 Summary:")
+                                st.success(summary)
+                                
+                                if enable_audio:
+                                    audio_bytes = text_to_speech(summary)
+                                    if audio_bytes:
+                                        st.audio(audio_bytes, format='audio/mp3')
+                        else:
+                            st.error("API not connected!")
     
     with col2:
         st.markdown("#### 📁 Upload Audio File")
@@ -473,34 +542,50 @@ with tab3:
         if audio_file:
             st.audio(audio_file, format=f'audio/{audio_file.name.split(".")[-1]}')
             
-            if st.button("📝 Transcribe File", use_container_width=True, key="transcribe_uploaded_file"):
-                with st.spinner("🎧 Transcribing audio..."):
-                    text, error = transcribe_audio_bytes(audio_file)
-                    
-                    if text:
-                        st.success("✅ Transcription complete!")
-                        st.markdown("#### 📄 Transcription:")
-                        st.info(text)
+            col_c, col_d = st.columns(2)
+            
+            with col_c:
+                if st.button("📝 Transcribe", use_container_width=True, key="transcribe_uploaded_file"):
+                    with st.spinner("🎧 Transcribing audio..."):
+                        text, error = transcribe_audio_bytes(audio_file)
                         
-                        # Copy to clipboard
-                        st.code(text, language=None)
-                        
-                        # Option to summarize
-                        if st.button("📊 Summarize Transcription", key="sum_file"):
-                            if st.session_state.api_connected:
-                                with st.spinner("🤖 Generating summary..."):
-                                    summary = summarize_text(text)
-                                    st.markdown("#### 📋 Summary:")
-                                    st.success(summary)
-                                    
-                                    if enable_audio:
-                                        audio_bytes = text_to_speech(summary)
-                                        if audio_bytes:
-                                            st.audio(audio_bytes, format='audio/mp3')
-                            else:
-                                st.error("API not connected!")
-                    else:
-                        st.error(f"❌ Transcription failed: {error}")
+                        if text:
+                            st.success("✅ Transcription complete!")
+                            st.markdown("#### 📄 Transcription:")
+                            st.info(text)
+                            
+                            # Store in session state
+                            st.session_state['last_transcription_upload'] = text
+                            
+                            # Copy to clipboard
+                            st.code(text, language=None)
+                            
+                            # Download transcription
+                            st.download_button(
+                                label="💾 Download Transcription",
+                                data=text,
+                                file_name=f"transcription_{audio_file.name.split('.')[0]}.txt",
+                                mime="text/plain"
+                            )
+                        else:
+                            st.error(f"❌ {error}")
+            
+            with col_d:
+                # Check if we have a transcription to summarize
+                if 'last_transcription_upload' in st.session_state and st.session_state['last_transcription_upload']:
+                    if st.button("📊 Summarize", use_container_width=True, key="sum_file"):
+                        if st.session_state.api_connected:
+                            with st.spinner("🤖 Generating summary..."):
+                                summary = summarize_text(st.session_state['last_transcription_upload'])
+                                st.markdown("#### 📋 Summary:")
+                                st.success(summary)
+                                
+                                if enable_audio:
+                                    audio_bytes = text_to_speech(summary)
+                                    if audio_bytes:
+                                        st.audio(audio_bytes, format='audio/mp3')
+                        else:
+                            st.error("API not connected!")
 
 # Footer
 st.markdown("---")
@@ -508,6 +593,7 @@ st.markdown(
     """
     <div style='text-align: center; color: gray;'>
         <p>🤖 Friday Voice Assistant | Powered by Google Gemini & Streamlit</p>
+        <p style='font-size: 0.8em;'>💡 Tip: Speak clearly for best transcription results</p>
     </div>
     """,
     unsafe_allow_html=True
