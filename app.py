@@ -17,7 +17,7 @@ os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide"
 
 # Page configuration
 st.set_page_config(
-    page_title="Friday Voice Assistant",
+    page_title="JARVIS Model Infinity",
     page_icon="🎤",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -139,7 +139,7 @@ def get_ai_response(question, short=True):
     """Get response from Gemini"""
     try:
         if short:
-            full_prompt = f"""You are Friday, a helpful voice assistant. Give short, clear answers (10-20 words maximum).
+            full_prompt = f"""You are Infinity, a helpful voice assistant. Give short, clear answers (10-20 words maximum).
 Be direct and friendly. Answer the question concisely.
 
 Question: {question}
@@ -183,7 +183,7 @@ Summary:"""
         return f"Error generating summary: {str(e)}"
 
 # Main UI
-st.title("🎤 Friday Voice Assistant")
+st.title("🎤 JARVIS Model Infinity")
 st.markdown("### Your AI-powered voice assistant with Gemini")
 
 # Sidebar
@@ -241,7 +241,7 @@ tab1, tab2, tab3 = st.tabs(["💬 Chat", "📝 Summarize Notes", "🎵 Transcrib
 
 # TAB 1: Chat Interface
 with tab1:
-    st.subheader("Ask Friday Anything")
+    st.subheader("Ask Infinity Anything")
     
     # Voice Input using Streamlit's native audio_input
     st.markdown("#### 🎙️ Voice Input")
@@ -268,7 +268,7 @@ with tab1:
                     if st.session_state.api_connected:
                         short_mode = response_mode == "Short (10-15 words)"
                         
-                        with st.spinner("🤖 Friday is thinking..."):
+                        with st.spinner("🤖 Infinity is thinking..."):
                             response = get_ai_response(text, short=short_mode)
                             
                             # Add to chat history
@@ -297,7 +297,7 @@ with tab1:
     if uploaded_audio:
         st.audio(uploaded_audio, format="audio/wav")
         
-        if st.button("🎧 Transcribe & Ask Friday", key="transcribe_chat_upload"):
+        if st.button("🎧 Transcribe & Ask Infinity", key="transcribe_chat_upload"):
             with st.spinner("🎧 Transcribing..."):
                 text, error = transcribe_audio_bytes(uploaded_audio)
                 
@@ -307,7 +307,7 @@ with tab1:
                     # Process with AI
                     if st.session_state.api_connected:
                         short_mode = response_mode == "Short (10-15 words)"
-                        with st.spinner("🤖 Friday is thinking..."):
+                        with st.spinner("🤖 Infinity is thinking..."):
                             response = get_ai_response(text, short=short_mode)
                             
                             st.session_state.chat_history.append({
@@ -340,7 +340,7 @@ with tab1:
         if st.session_state.api_connected:
             short_mode = response_mode == "Short (10-15 words)"
             
-            with st.spinner("🤖 Friday is thinking..."):
+            with st.spinner("🤖 Infinity is thinking..."):
                 response = get_ai_response(user_question, short=short_mode)
                 
                 # Add to chat history
@@ -376,7 +376,7 @@ with tab1:
                         if audio_bytes:
                             st.audio(audio_bytes, format='audio/mp3')
     else:
-        st.info("👋 Start a conversation with Friday! Use voice recording, upload audio, or type your question.")
+        st.info("👋 Start a conversation with Infinity! Use voice recording, upload audio, or type your question.")
 
 # TAB 2: Summarize Notes
 with tab2:
@@ -592,7 +592,7 @@ st.markdown("---")
 st.markdown(
     """
     <div style='text-align: center; color: gray;'>
-        <p>🤖 Friday Voice Assistant | Powered by Google Gemini & Streamlit</p>
+        <p>🤖 JARVIS Model Infinity</p>
         <p style='font-size: 0.8em;'>💡 Tip: Speak clearly for best transcription results</p>
     </div>
     """,
